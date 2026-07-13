@@ -660,6 +660,7 @@ class Checker:
 
         url = 'nodes/{}/storage/{}/content'
         url = url.format(node_name, storage_name)
+
         request = self.proxmox(url)
 
         try:
