@@ -25,6 +25,14 @@ ICINGA_CRITICAL = 2
 ICINGA_UNKNOWN = 3
 ICINGA_LABELS = {0: 'OK', 1: 'WARNING', 2: 'CRITICAL', 3: 'UNKNOWN'}
 
+# HTTP status codes returned by the Proxmox API that are worth retrying
+# (e.g. 596 = connection timed out during TLS negotiation/request)
+RETRYABLE_HTTP_STATUS_CODES = [596]
+
+# Retry policy for retryable API calls
+RETRY_TIMES = 10
+RETRY_INTERVAL = 5
+
 def icinga_exit(level, details=None, perfdata=[]):
     """Exit to system producing an output conform
     to the Icinga standards.
@@ -663,11 +671,28 @@ class Checker:
 
         request = self.proxmox(url)
 
-        try:
-            backups = request.get(content='backup')
-        except ResourceException as e:
-            # TODO: if e.status_code == 596 retry, else raise e
-            raise e
+        attempt = 1
+        while True:
+            try:
+                backups = request.get(content='backup')
+                break
+            except ResourceException as e:
+                if e.status_code not in RETRYABLE_HTTP_STATUS_CODES:
+                    raise e
+
+                if attempt >= RETRY_TIMES:
+                    msg = 'Giving up after {} attempts: {}'
+                    logging.debug(msg.format(attempt, e))
+                    raise e
+
+                msg = 'Attempt {}/{} failed with HTTP {}: {} - retrying in {}s ...'
+                msg = msg.format(
+                    attempt, RETRY_TIMES, e.status_code, e, RETRY_INTERVAL
+                )
+                logging.debug(msg)
+
+                time.sleep(RETRY_INTERVAL)
+                attempt += 1
 
         self.backups = {}
 
