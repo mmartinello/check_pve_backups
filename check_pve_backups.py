@@ -7,7 +7,7 @@ authors:
     Mattia Martinello - mattia@mattiamartinello.com
 """
 
-_VERSION = '1.0'
+_VERSION = '1.1'
 _VERSION_DESCR = 'Monitors virtual machines backups of a Proxmox VE node.'
 
 import argparse
