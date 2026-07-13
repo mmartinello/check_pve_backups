@@ -227,6 +227,24 @@ class Checker:
             help='Print OK backups (default false)'
         )
 
+        parser.add_argument(
+            '--retry-times',
+            dest='retry_times',
+            type=int,
+            default=RETRY_TIMES,
+            help='Number of retries on retryable API errors'
+                 ' (default {})'.format(RETRY_TIMES)
+        )
+
+        parser.add_argument(
+            '--retry-interval',
+            dest='retry_interval',
+            type=int,
+            default=RETRY_INTERVAL,
+            help='Seconds to wait between retries on retryable API errors'
+                 ' (default {})'.format(RETRY_INTERVAL)
+        )
+
     def _manage_arguments(self, args):
         """Get command arguments from the argument parser and load them.
         """
@@ -266,6 +284,10 @@ class Checker:
 
         # backup storage
         self.print_ok = getattr(args, 'print_ok', False)
+
+        # retry policy for retryable API calls
+        self.retry_times = getattr(args, 'retry_times', RETRY_TIMES)
+        self.retry_interval = getattr(args, 'retry_interval', RETRY_INTERVAL)
 
         # print arguments (debug)
         logging.debug('Command arguments: {}'.format(args))
@@ -680,18 +702,18 @@ class Checker:
                 if e.status_code not in RETRYABLE_HTTP_STATUS_CODES:
                     raise e
 
-                if attempt >= RETRY_TIMES:
+                if attempt >= self.retry_times:
                     msg = 'Giving up after {} attempts: {}'
                     logging.debug(msg.format(attempt, e))
                     raise e
 
                 msg = 'Attempt {}/{} failed with HTTP {}: {} - retrying in {}s ...'
                 msg = msg.format(
-                    attempt, RETRY_TIMES, e.status_code, e, RETRY_INTERVAL
+                    attempt, self.retry_times, e.status_code, e, self.retry_interval
                 )
                 logging.debug(msg)
 
-                time.sleep(RETRY_INTERVAL)
+                time.sleep(self.retry_interval)
                 attempt += 1
 
         self.backups = {}
