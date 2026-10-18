@@ -57,7 +57,7 @@ check_pve_backups.py [-h] [-V] [--debug] [--debug2] [-H HOST] [-P PORT]
 | `--verify-ssl` | Verify the SSL certificate (default false) |
 | `-l`, `--level {warning,critical}` | Icinga error level to raise on failure (`not_backed_up` check only, default `critical`) |
 | `-s`, `--storage STORAGE` | The backup storage (required in `backups` check mode) |
-| `-n`, `--node NODE` | Filter the VMs running on this Proxmox node |
+| `-n`, `--node NODE` | Filter the VMs running on this Proxmox node (if not given, all the VMs of the cluster are checked) |
 | `-t`, `--timeout TIMEOUT` | API request timeout in seconds (default `300`) |
 | `-i`, `--include`, `--vmid INCLUDED_VMIDS` | VM IDs to check (repeatable), mutually exclusive with `-e` |
 | `-e`, `--exclude EXCLUDED_VMIDS` | VM IDs to exclude from the check (repeatable), mutually exclusive with `-i` |
@@ -66,6 +66,23 @@ check_pve_backups.py [-h] [-V] [--debug] [--debug2] [-H HOST] [-P PORT]
 | `--print-ok`, `-k` | Also print VMs/CTs with an up-to-date backup (default false) |
 | `--retry-times RETRY_TIMES` | Number of retries on retryable API errors, e.g. HTTP 596 (default `10`) |
 | `--retry-interval RETRY_INTERVAL` | Seconds to wait between retries on retryable API errors (default `5`) |
+
+### Node mode and cluster mode
+
+In `backups` check mode:
+
+- **Node mode** (`--node` given): checks the VMs/CTs running on the given
+  node, reading the backups of the storage from that node.
+- **Cluster mode** (`--node` not given): checks all the VMs/CTs of the
+  cluster (`/cluster/resources`). The backups are read from the nodes where
+  the storage is available: if the storage is shared (e.g. PBS), only the
+  first node answering is queried (the next one is tried on error),
+  otherwise the backups of all the nodes are merged, keeping the newest
+  backup for each VM.
+
+Cluster mode is useful when the API endpoint is a load balancer (e.g.
+HAProxy) in front of the cluster nodes: a single check covers the whole
+cluster, regardless of which node answers.
 
 ### Retry behaviour
 
@@ -96,6 +113,15 @@ policy:
     --node pve1 --storage backup-pbs \
     --warning 1800 --critical 3240 \
     --retry-times 5 --retry-interval 10
+```
+
+Check backup age for all the VMs of the cluster (no `--node`), through a
+load-balanced API endpoint:
+
+```bash
+./check_pve_backups.py backups \
+    --host pve.example.com --username icinga@pve --password secret \
+    --storage backup-pbs --warning 1800 --critical 3240
 ```
 
 ## Exit codes

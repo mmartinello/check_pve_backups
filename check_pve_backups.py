@@ -176,7 +176,8 @@ class Checker:
         parser.add_argument(
             '-n', '--node',
             dest='node',
-            help='Filter the VMs running on this Proxmox node'
+            help='Filter the VMs running on this Proxmox node (if not given,'
+                 ' all the VMs of the cluster are checked)'
         )
 
         parser.add_argument(
@@ -548,9 +549,9 @@ class Checker:
         elif self.node:
             node_name = self.node
             vmids = self._get_node_vms(node_name)
-        # Else, don't filter vms
+        # Else, get all the vms of the cluster
         else:
-            vmids = []
+            vmids = self._get_cluster_vms()
 
         # If excluded VM IDs are given, exclude them from the VM list
         if self.excluded_vmids:
@@ -608,8 +609,11 @@ class Checker:
         messages = {}
         perfdata = []
         backup_msg = 'last backup for VMID {} created at {}'
-        backup_timestamp = int(backup['ctime'])
-        backup_ctime_string = datetime.fromtimestamp(backup_timestamp).strftime('%Y-%m-%d %H:%M:%S')
+
+        def backup_ctime_string(backup):
+            backup_timestamp = int(backup['ctime'])
+            return datetime.fromtimestamp(backup_timestamp).strftime('%Y-%m-%d %H:%M:%S')
+
         if data['unavailable']:
             vms = [ str(i) for i in data['unavailable'] ]
             logging.debug("Unavailable VMs: {}".format(vms))
@@ -624,7 +628,7 @@ class Checker:
             vm_messages = []
             vms_count = len(data['critical'])
             for vmid, backup in data['critical'].items():
-                vm_messages.append(backup_msg.format(vmid, backup_ctime_string))
+                vm_messages.append(backup_msg.format(vmid, backup_ctime_string(backup)))
             msg = '{} VM{} WITH CRITICAL BACKUPS: {}'.format(
                 vms_count,
                 's' if vms_count > 1 else '',
@@ -635,7 +639,7 @@ class Checker:
             vm_messages = []
             vms_count = len(data['warning'])
             for vmid, backup in data['warning'].items():
-                vm_messages.append(backup_msg.format(vmid, backup_ctime_string))
+                vm_messages.append(backup_msg.format(vmid, backup_ctime_string(backup)))
             msg = '{} VM{} WITH WARNING BACKUPS: {}'.format(
                 vms_count,
                 's' if vms_count > 1 else '',
@@ -647,7 +651,7 @@ class Checker:
                 vm_messages = []
                 vms_count = len(data['ok'])
                 for vmid, backup in data['ok'].items():
-                    vm_messages.append(backup_msg.format(vmid, backup_ctime_string))
+                    vm_messages.append(backup_msg.format(vmid, backup_ctime_string(backup)))
                 msg = '{} VM{} WITH OK BACKUPS: {}'.format(
                     vms_count,
                     's' if vms_count > 1 else '',
@@ -682,10 +686,105 @@ class Checker:
         taken.
 
         Args:
-            node_name (string): the name of the PVE cluster node
+            node_name (string): the name of the PVE cluster node (None to
+                get backups from all the cluster nodes)
             storage_name (string): the name of the storage to list backups from
             vmids (list): the list of IDs of virtual machines to get backups
                 for
+        """
+
+        if node_name:
+            backups = self._get_storage_backups(node_name, storage_name)
+        else:
+            backups = self._get_cluster_storage_backups(storage_name)
+
+        self.backups = {}
+
+        msg = "Backups returned from API: {}".format(backups)
+        logging.debug(msg)
+
+        # cycle backup list
+        for backup in backups:
+            vmid = backup['vmid']
+            ctime = backup['ctime']
+            backup = {'vmid': vmid, 'ctime': ctime}
+
+            # if vmids not provided, consider all backups
+            if not vmids:
+                self._add_backup(backup)
+                continue
+            # else check if the backup vmid is into the vmids list
+            if vmids and vmid in vmids:
+                self._add_backup(backup)
+                continue
+
+        return self.backups
+
+    def _get_cluster_storage_backups(self, storage_name):
+        """Get backups stored into the given storage from the cluster nodes
+        where the storage is available. If the storage is shared, only the
+        first node answering is queried, else backups of all the nodes are
+        merged.
+
+        Args:
+            storage_name (string): the name of the storage to list backups from
+
+        Return:
+            the list of backups returned from the API
+        """
+
+        # get the nodes where the storage is available
+        url = 'cluster/resources'
+        storages = self.proxmox(url).get(type='storage')
+        storages = [
+            s for s in storages
+            if s.get('storage') == storage_name
+            and s.get('status') == 'available'
+        ]
+
+        if not storages:
+            msg = 'storage {} not available on any cluster node'
+            raise Exception(msg.format(storage_name))
+
+        nodes = [s['node'] for s in storages]
+        shared = any(s.get('shared') for s in storages)
+
+        msg = 'Storage {} (shared: {}) available on nodes: {}'
+        logging.debug(msg.format(storage_name, shared, nodes))
+
+        backups = []
+        for i, node_name in enumerate(nodes):
+            try:
+                node_backups = self._get_storage_backups(
+                    node_name, storage_name
+                )
+            except ResourceException as e:
+                # a shared storage can be read from another node
+                if not shared or i == len(nodes) - 1:
+                    raise e
+
+                msg = 'Cannot get backups from node {}: {} - trying next node'
+                logging.debug(msg.format(node_name, e))
+                continue
+
+            backups.extend(node_backups)
+
+            # a shared storage has the same content on every node
+            if shared:
+                break
+
+        return backups
+
+    def _get_storage_backups(self, node_name, storage_name):
+        """Get backups stored into the given storage on the given PVE node,
+        retrying on retryable API errors.
+
+        Args:
+            node_name (string): the name of the PVE cluster node
+            storage_name (string): the name of the storage to list backups from
+
+        Return:
+            the list of backups returned from the API
         """
 
         url = 'nodes/{}/storage/{}/content'
@@ -716,27 +815,7 @@ class Checker:
                 time.sleep(self.retry_interval)
                 attempt += 1
 
-        self.backups = {}
-
-        msg = "Backups returned from API: {}".format(backups)
-        logging.debug(msg)
-
-        # cycle backup list
-        for backup in backups:
-            vmid = backup['vmid']
-            ctime = backup['ctime']
-            backup = {'vmid': vmid, 'ctime': ctime}
-
-            # if vmids not provided, consider all backups
-            if not vmids:
-                self._add_backup(backup)
-                continue
-            # else check if the backup vmid is into the vmids list
-            if vmids and vmid in vmids:
-                self._add_backup(backup)
-                continue
-                
-        return self.backups
+        return backups
 
     def _add_backup(self, backup):
         """Insert the given backup in the backup list, only if the given
@@ -823,6 +902,25 @@ class Checker:
         logging.debug(msg)
 
         return node_vms
+
+    def _get_cluster_vms(self):
+        """Get the virtual machines of the whole PVE cluster
+
+        Return:
+            a list of IDs of the qemu and lxc virtual machines of the cluster
+        """
+
+        url = 'cluster/resources'
+        vms = self.proxmox(url).get(type='vm')
+
+        cluster_vms = [int(vm['vmid']) for vm in vms]
+
+        vm_count = len(cluster_vms)
+        msg = '{} virtual machines on the cluster: {}'
+        msg = msg.format(vm_count, cluster_vms)
+        logging.debug(msg)
+
+        return cluster_vms
 
 
 if __name__ == "__main__":
